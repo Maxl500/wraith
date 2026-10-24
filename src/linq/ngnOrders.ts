@@ -30,6 +30,8 @@
  */
 
 import { prisma } from "../db";
+import { recordOrderTerminal, terminalStatusOf } from "../metrics";
+import { resolveEventNetwork } from "./webhook";
 
 export type NgnOrderKind = "onramp" | "bill";
 
@@ -123,6 +125,8 @@ export async function findNgnOrder(
   orderId: string,
 ): Promise<{
   orderId: string;
+  customerRef: string;
+  walletAddress: string;
   status: string;
   kind: string;
   coin: string;
@@ -145,6 +149,8 @@ export async function findNgnOrder(
 
   return {
     orderId: row.orderId,
+    customerRef: row.customerRef,
+    walletAddress: row.walletAddress,
     status: row.status,
     kind: row.kind,
     coin: row.coin,
@@ -163,25 +169,37 @@ export async function findNgnOrder(
 /**
  * Apply a webhook event to an order we placed.
  *
- * Returns false when the order is not ours, so the caller can say so rather
- * than silently succeeding. Nothing here creates a row: an event for an order
- * we never placed is not ours to act on.
+ * Looked up by the compound `(network, orderId)` key. An explicit event
+ * `network` wins; without one the deployment's configured network is used.
+ * Returns false when the network is invalid or the order is not ours, so the
+ * caller can say so rather than silently succeeding. Nothing here creates a
+ * row: an event for an order we never placed is not ours to act on.
  */
 export async function reconcileNgnOrder(event: {
   orderId: string;
+  network?: string;
   status?: string;
   event: string;
   amountStableCoin?: number;
   amountNGN?: number;
   txHash?: string;
 }): Promise<boolean> {
-  const existing = await prisma.ngnOrder.findFirst({ where: { orderId: event.orderId } });
+  const network = resolveEventNetwork(event);
+  if (!network) return false;
+
+  const existing = await prisma.ngnOrder.findUnique({
+    where: { network_orderId: { network, orderId: event.orderId } },
+  });
   if (!existing) return false;
 
+  const status = event.status ?? event.event;
+  const wasTerminal = terminalStatusOf(existing.status);
+  const isTerminal = terminalStatusOf(status);
+
   await prisma.ngnOrder.update({
-    where: { network_orderId: { network: existing.network, orderId: event.orderId } },
+    where: { network_orderId: { network, orderId: event.orderId } },
     data: {
-      status: event.status ?? event.event,
+      status,
       ...(event.amountStableCoin != null
         ? { settledStableCoin: String(event.amountStableCoin) }
         : {}),
@@ -189,5 +207,9 @@ export async function reconcileNgnOrder(event: {
       ...(event.txHash ? { txHash: event.txHash } : {}),
     },
   });
+
+  if (isTerminal && !wasTerminal) {
+    recordOrderTerminal(existing.kind === "bill" ? "bills" : "onramp", status);
+  }
   return true;
 }

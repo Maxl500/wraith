@@ -5,10 +5,10 @@ dist/
 docs/openapi.json
 temp_auto_push.bat
 docs/api/
-.env
 *.env.local
 bench/results.json
 .aider*
 coverage/
 .gitignore
 branch_structure.json
+config.bat
