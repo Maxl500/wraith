@@ -55,9 +55,11 @@ import {
   offrampOrderResponseSchema,
   offrampOrderParamsSchema,
   offrampOrderStatusResponseSchema,
-  offrampErrorResponseSchema,
+  railErrorResponseSchema,
   ngnCustomerStatusQuerySchema,
   ngnCustomerStatusResponseSchema,
+  feeReportQuerySchema,
+  feeReportResponseSchema,
   feesQuerySchema,
   feesResponseSchema,
 } from "./schemas";
@@ -147,7 +149,14 @@ registry.registerPath({
       description: "OK",
       content: { "application/json": { schema: ngnCustomerStatusResponseSchema } },
     },
-    ...commonErrorResponses,
+    // Rail error shape (#287): every failure on /ngn carries `code`.
+    400: { description: "Bad Request (invalid_request / invalid_network / network_not_enabled / mainnet_only)", content: { "application/json": { schema: railErrorResponseSchema } } },
+    404: { description: "Not Found (code: not_found)", content: { "application/json": { schema: railErrorResponseSchema } } },
+    429: { description: "Rate limited (veil_rate_limited ours / rate_limited the provider's)", content: { "application/json": { schema: railErrorResponseSchema } } },
+    500: { description: "Internal Server Error (code: internal_error)", content: { "application/json": { schema: railErrorResponseSchema } } },
+    502: { description: "Provider error", content: { "application/json": { schema: railErrorResponseSchema } } },
+    503: { description: "Naira rails not configured on this deployment", content: { "application/json": { schema: railErrorResponseSchema } } },
+    504: { description: "Provider did not respond in time", content: { "application/json": { schema: railErrorResponseSchema } } },
   },
 });
 
@@ -452,3 +461,245 @@ registry.registerPath({
     ...commonErrorResponses,
   },
 });
+
+const transferExportResponses = {
+  200: {
+    description: "File download of the full matching transfer set (no pagination).",
+    content: {
+      "text/csv": { schema: binaryExportResponseSchema },
+      "application/octet-stream": { schema: binaryExportResponseSchema },
+    },
+  },
+  ...commonErrorResponses,
+};
+
+registry.registerPath({
+  method: "get",
+  path: "/transfers.csv",
+  summary: "Export all transfers as CSV",
+  description:
+    "Streams every transfer matching the filters as CSV. No pagination: the " +
+    "response is the entire matching set, so narrow it with the ledger or date " +
+    "bounds on large deployments.",
+  request: { query: transferExportQuerySchema },
+  responses: transferExportResponses,
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/transfers.parquet",
+  summary: "Export all transfers as Parquet",
+  description:
+    "Streams every transfer matching the filters as an Apache Parquet file. " +
+    "Same filters and streaming behaviour as /transfers.csv.",
+  request: { query: transferExportQuerySchema },
+  responses: transferExportResponses,
+});
+
+// Internal surfaces, kept in the spec for completeness. The provider webhook
+// is a signature-verified callback from the payout provider and the offramp
+// router is the wallet's own cash-out surface fronting a server-side provider
+// API — neither is a public data API, so both carry `x-internal`.
+//
+// `x-internal` rather than `deprecated`: these routes are live and the wallet
+// calls them today. `deprecated` tells every generator and every reader that
+// the endpoint is being withdrawn, which would read as cash-out being retired.
+const internalDescription =
+  "Internal endpoint. Not part of the public data API: " +
+  "(provider callback / wallet-only cash-out surface served on behalf of the Veil wallet client).";
+
+registry.registerPath({
+  method: "post",
+  path: "/webhooks/linq",
+  summary: "Payout webhook (provider callback)",
+  description: internalDescription,
+  "x-internal": true,
+  responses: {
+    200: { description: "Acknowledged", content: { "application/json": { schema: linqWebhookAckResponseSchema } } },
+    401: { description: "Invalid signature", content: { "application/json": { schema: errorResponseSchema } } },
+    400: { description: "Unrecognised event", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
+
+const internalErrorResponses = {
+  ...commonErrorResponses,
+  429: { description: "Rate limited (this deployment's or the provider's — the `code` says which)", content: { "application/json": { schema: railErrorResponseSchema } } },
+  502: { description: "Payout provider error", content: { "application/json": { schema: railErrorResponseSchema } } },
+  503: { description: "Offramp not configured on this deployment", content: { "application/json": { schema: railErrorResponseSchema } } },
+};
+
+registry.registerPath({
+  method: "get",
+  path: "/offramp/availability",
+  summary: "Is cash-out enabled on this deployment",
+  description:
+    internalDescription +
+    " Answers the availability question without pricing anything: it makes no provider call, so it costs none of the shared rate allowance.",
+  "x-internal": true,
+  responses: {
+    200: {
+      description: "OK",
+      content: { "application/json": { schema: offrampAvailabilityResponseSchema } },
+    },
+    ...commonErrorResponses,
+    // No 502: nothing here reaches the provider. 503 is the answer a client
+    // hides its cash-out CTA on, so it is the one that has to be documented.
+    503: { description: "Offramp not configured on this deployment", content: { "application/json": { schema: railErrorResponseSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/offramp/rate",
+  summary: "Indicative naira-per-coin rate",
+  description: internalDescription,
+  "x-internal": true,
+  request: { query: offrampRateQuerySchema },
+  responses: {
+    200: { description: "OK", content: { "application/json": { schema: offrampRateResponseSchema } } },
+    ...internalErrorResponses,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/offramp/verify-bank",
+  summary: "Verify a bank account before creating an order",
+  description: internalDescription,
+  "x-internal": true,
+  request: {
+    body: {
+      required: true,
+      content: { "application/json": { schema: offrampVerifyBankBodySchema } },
+    },
+  },
+  responses: {
+    200: { description: "OK", content: { "application/json": { schema: offrampVerifiedBankSchema } } },
+    ...internalErrorResponses,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/offramp/trustline",
+  summary: "Check a refund address holds a USDC trustline",
+  description: internalDescription,
+  "x-internal": true,
+  request: { query: offrampTrustlineQuerySchema },
+  responses: {
+    200: { description: "OK", content: { "application/json": { schema: offrampTrustlineResponseSchema } } },
+    ...internalErrorResponses,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/offramp/orders",
+  summary: "Create a cash-out order",
+  description: internalDescription,
+  "x-internal": true,
+  request: {
+    body: {
+      required: true,
+      content: { "application/json": { schema: offrampOrderBodySchema } },
+    },
+  },
+  responses: {
+    201: { description: "Order created", content: { "application/json": { schema: offrampOrderResponseSchema } } },
+    200: { description: "Replayed existing order (same idempotencyKey)", content: { "application/json": { schema: offrampOrderResponseSchema } } },
+    ...internalErrorResponses,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/offramp/orders/{orderId}",
+  summary: "Get the status of a cash-out order",
+  description: internalDescription,
+  "x-internal": true,
+  request: { params: offrampOrderParamsSchema },
+  responses: {
+    200: { description: "OK", content: { "application/json": { schema: offrampOrderStatusResponseSchema } } },
+    401: { description: "Order access token required (code: unauthorized)", content: { "application/json": { schema: railErrorResponseSchema } } },
+    ...internalErrorResponses,
+  },
+});
+
+registry.registerComponent("securitySchemes", "bearerAuth", { type: "http", scheme: "bearer" });
+
+registry.registerPath({
+  method: "get",
+  path: "/fees/report",
+  summary: "Platform fees charged, per UTC day and asset, with the policy behind them",
+  description:
+    "Internal endpoint. Not part of the public data API: an operator report over the fee " +
+    "ledger, behind the VEIL_FEE_REPORT_TOKEN bearer token. Nothing in it identifies a person.",
+  "x-internal": true,
+  security: [{ bearerAuth: [] }],
+  request: { query: feeReportQuerySchema },
+  responses: {
+    200: { description: "OK", content: { "application/json": { schema: feeReportResponseSchema } } },
+    400: { description: "Bad date range", content: { "application/json": { schema: errorResponseSchema } } },
+    401: { description: "Missing or wrong report token", content: { "application/json": { schema: errorResponseSchema } } },
+    500: { description: "The fee ledger could not be read", content: { "application/json": { schema: errorResponseSchema } } },
+    503: { description: "Fee reporting is not configured on this deployment", content: { "application/json": { schema: errorResponseSchema } } },
+  },
+});
+
+if (getOhlcRefreshIntervalMs() !== undefined) {
+  registry.registerPath({
+    method: "get",
+    path: "/candles/{bucket}/{contractId}",
+    summary: "OHLC candles for a token contract (single-network deployments only)",
+    request: {
+      params: candlesParamsSchema,
+      query: candlesQuerySchema,
+    },
+    responses: {
+      200: { description: "OK", content: { "application/json": { schema: candlesResponseSchema } } },
+      ...commonErrorResponses,
+    },
+  });
+}
+
+const generator = new OpenApiGeneratorV3(registry.definitions);
+const document = generator.generateDocument({
+  openapi: "3.0.3",
+  info: {
+    title: "Wraith API",
+    version: "1.0.0",
+    description: "REST API documentation for the Wraith token transfer indexer.",
+    license: {
+      name: "MIT",
+      url: "https://opensource.org/licenses/MIT",
+    },
+  },
+  servers: [
+    {
+      url: "http://127.0.0.1:3000",
+      description: "Local development server",
+    },
+  ],
+});
+
+export function buildOpenApiDocument(): typeof document {
+  return document;
+}
+
+// Write only when run as a script (npm run docs:openapi). Importing the
+// builder from tests must not overwrite the committed spec files — the
+// openapiCoverage test compares them against the generated output to catch
+// drift, which would be tautological if the import itself refreshed them.
+if (require.main === module) {
+  const outputFiles = [
+    path.resolve(process.cwd(), "openapi.json"),
+    path.resolve(process.cwd(), "docs", "openapi.json"),
+  ];
+
+  for (const filePath of outputFiles) {
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    writeFileSync(filePath, `${JSON.stringify(document, null, 2)}\n`, "utf8");
+  }
+
+  console.log(`Wrote OpenAPI document to ${outputFiles.join(" and ")}`);
+}
