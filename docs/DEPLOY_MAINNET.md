@@ -4,6 +4,20 @@ Deploying Wraith on mainnet requires a more robust infrastructure setup than tes
 
 When running both testnet and mainnet indexers, it is recommended to run them side-by-side as separate deployments (with separate databases) rather than combining them, ensuring one network's issues don't impact the other. A single process *can* index both by setting `NETWORKS=testnet,mainnet` — see [DUAL_NETWORK.md](./DUAL_NETWORK.md) for the trade-offs, and [DEPLOYMENT_CONFIGURATIONS.md](./DEPLOYMENT_CONFIGURATIONS.md) for end-to-end documentation of live and standard deployment topologies.
 
+## 0. Deploy Procedure (manual)
+
+Deploys are manual. There is no deploy workflow and no `render.yaml`. Procedure:
+
+1. Merge the change to `main`.
+2. In Render, trigger a manual deploy of the mainnet service from `main` (or, for testnet, the testnet service).
+3. Wait for the build to finish and the service to report healthy.
+4. Verify the running commit: `curl -s https://<your-service>/status` and confirm the `commit` field equals the `main` SHA.
+5. If the schema changed, confirm the migration under `prisma/migrations/` was applied. `build` and `start` do not apply migrations.
+
+The running commit is reported on `/status` as the `commit` field. The value is injected at build time from the build environment (`RENDER_GIT_COMMIT`, falling back to `GIT_COMMIT`), not from a hand-edited file. If `commit` is `unknown`, the build did not receive a commit SHA.
+
+Approach chosen: documented manual procedure. Automating the deploy was not done here, so the steps above are the source of truth until a deploy workflow exists. This is a deliberate choice: a documented procedure is verifiable today, whereas an unverified automated workflow could trigger a mainnet deploy of a money-moving service without review. Revisit once a deploy workflow is in place.
+
 ## 1. Database (Managed Postgres)
 
 **Critical:** Do *not* use Render's free PostgreSQL for a mainnet deployment. Render deletes free databases after 90 days, which will destroy your indexed state.

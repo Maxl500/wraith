@@ -1,6 +1,10 @@
 # ── Stage 1: Install all deps + build TypeScript ─────────────────────────────
 FROM node:20-alpine AS builder
 
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.revision=${GIT_SHA}
+
+
 # Prisma's engines need OpenSSL on Alpine (musl); without it engine loading
 # fails with "Error loading shared library" / libssl detection warnings.
 RUN apk add --no-cache openssl
@@ -34,5 +38,8 @@ COPY --from=builder /app/prisma ./prisma
 # above installs @prisma/client but not the generated client, so the app crashed
 # on boot with "@prisma/client did not initialize yet".
 RUN npm run db:generate
+
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
 
 CMD ["node", "dist/index.js"]
